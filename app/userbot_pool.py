@@ -29,11 +29,25 @@ async def start():
         me = await client.get_me()
         logger.info(f"Userbot {i} connected as @{me.username or me.id}")
 
-        try:
-            await client.send_message(config.CHANNEL_ID, f"🤖 Assistant {i} Online - @{me.username or me.id}")
-            logger.info(f"Userbot {i}: startup message sent, channel peer resolved.")
-        except Exception as ex:
-            logger.error(f"Userbot {i}: could not send startup message ({ex}). Check CHANNEL_ID and account membership.")
+        chat = None
+        if config.CHANNEL_USERNAME:
+            try:
+                chat = await client.get_chat(config.CHANNEL_USERNAME)
+            except Exception as ex:
+                logger.warning(f"Userbot {i}: username resolve failed ({ex}), trying ID.")
+
+        if chat is None:
+            try:
+                chat = await client.get_chat(config.CHANNEL_ID)
+            except Exception as ex:
+                logger.error(f"Userbot {i}: channel peer NOT resolved ({ex}). Downloads will fail!")
+
+        if chat is not None:
+            try:
+                await client.send_message(chat.id, f"🤖 Assistant {i} Online - @{me.username or me.id}")
+                logger.info(f"Userbot {i}: startup message sent to {chat.title}")
+            except Exception as ex:
+                logger.error(f"Userbot {i}: startup message failed ({ex})")
 
         _clients.append(client)
 
