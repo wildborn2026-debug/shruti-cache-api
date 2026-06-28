@@ -1,6 +1,7 @@
 import asyncio
 import io
 import logging
+import os
 import random
 
 from pyrogram import Client
@@ -13,17 +14,47 @@ logger = logging.getLogger("userbot_pool")
 _clients: list[Client] = []
 _op_semaphore: asyncio.Semaphore | None = None
 
+SESSIONS_DIR = "sessions"
+
+
+async def _reconnect(client: Client, index: int):
+    try:
+        await client.stop()
+    except Exception:
+        pass
+    try:
+        await client.start()
+        me = await client.get_me()
+        logger.info(f"Userbot {index}: reconnected as @{me.username or me.id}")
+    except Exception as ex:
+        logger.error(f"Userbot {index}: reconnect failed ({ex})")
+
 
 async def start():
     global _op_semaphore
     _op_semaphore = asyncio.Semaphore(config.MAX_CONCURRENT_OPS)
 
+    os.makedirs(SESSIONS_DIR, exist_ok=True)
+
     for i, session in enumerate(config.SESSION_STRINGS, start=1):
+        session_path = os.path.join(SESSIONS_DIR, f"userbot_{i}")
+
+        if not os.path.exists(f"{session_path}.session"):
+            logger.info(f"Userbot {i}: no disk session found, creating from session_string...")
+            temp = Client(
+                name=session_path,
+                api_id=config.API_ID,
+                api_hash=config.API_HASH,
+                session_string=session,
+            )
+            await temp.start()
+            await temp.stop()
+            logger.info(f"Userbot {i}: session file created at {session_path}.session")
+
         client = Client(
-            name=f"userbot_{i}",
+            name=session_path,
             api_id=config.API_ID,
             api_hash=config.API_HASH,
-            session_string=session,
         )
         await client.start()
         me = await client.get_me()
@@ -68,28 +99,36 @@ class AllAccountsFloodWaited(Exception):
 
 
 async def _try_each_account(action, action_name: str):
-    available = _clients.copy()
+    available = list(enumerate(_clients, start=1))
     random.shuffle(available)
 
     last_wait = None
-    for client in available:
+    dead_clients = []
+
+    for index, client in available:
         try:
             return await action(client)
         except FloodWait as e:
-            logger.warning(f"{action_name}: FloodWait {e.value}s on account, trying next.")
+            logger.warning(f"{action_name}: FloodWait {e.value}s on userbot {index}, trying next.")
             last_wait = e.value if last_wait is None else min(last_wait, e.value)
-            continue
+        except OSError as e:
+            logger.warning(f"{action_name}: TCP connection dead on userbot {index} ({e}), reconnecting.")
+            dead_clients.append((index, client))
+
+    if dead_clients:
+        for index, client in dead_clients:
+            asyncio.create_task(_reconnect(client, index))
 
     if last_wait is not None and last_wait <= config.MAX_FLOODWAIT_SECONDS:
         logger.warning(f"{action_name}: all accounts flood-waited, sleeping {last_wait}s then retrying once.")
         await asyncio.sleep(last_wait)
-        for client in available:
+        for index, client in available:
             try:
                 return await action(client)
-            except FloodWait:
+            except (FloodWait, OSError):
                 continue
 
-    raise AllAccountsFloodWaited(f"All {len(_clients)} account(s) are flood-waited for {action_name}.")
+    raise AllAccountsFloodWaited(f"All {len(_clients)} account(s) unavailable for {action_name}.")
 
 
 async def download_from_channel(msg_id: int) -> tuple[bytes, str] | None:
@@ -119,7 +158,7 @@ async def download_from_channel(msg_id: int) -> tuple[bytes, str] | None:
         try:
             return await _try_each_account(action, "download_from_channel")
         except AllAccountsFloodWaited:
-            logger.error("download_from_channel: all accounts flood-waited, returning None.")
+            logger.error("download_from_channel: all accounts unavailable, returning None.")
             return None
 
 
@@ -145,5 +184,5 @@ async def upload_to_channel(file_bytes: bytes, file_name: str, video_id: str, is
         try:
             return await _try_each_account(action, "upload_to_channel")
         except AllAccountsFloodWaited:
-            logger.error("upload_to_channel: all accounts flood-waited, upload skipped.")
+            logger.error("upload_to_channel: all accounts unavailable, upload skipped.")
             return None
