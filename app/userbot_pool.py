@@ -6,6 +6,7 @@ import random
 
 from pyrogram import Client
 from pyrogram.errors import FloodWait
+from pyrogram.storage import FileStorage
 
 from app import config
 
@@ -15,6 +16,29 @@ _clients: list[Client] = []
 _op_semaphore: asyncio.Semaphore | None = None
 
 SESSIONS_DIR = os.path.abspath("sessions")
+
+
+async def _session_string_to_file(session_string: str, session_path: str, api_id: int):
+    temp = Client(
+        name=session_path,
+        api_id=api_id,
+        api_hash=config.API_HASH,
+        session_string=session_string,
+    )
+    await temp.start()
+    mem = temp.storage
+    file_storage = FileStorage(name=os.path.basename(session_path), workdir=SESSIONS_DIR)
+    await file_storage.open()
+    await file_storage.dc_id(await mem.dc_id())
+    await file_storage.api_id(await mem.api_id())
+    await file_storage.test_mode(await mem.test_mode())
+    await file_storage.auth_key(await mem.auth_key())
+    await file_storage.date(await mem.date())
+    await file_storage.user_id(await mem.user_id())
+    await file_storage.is_bot(await mem.is_bot())
+    await file_storage.save()
+    await file_storage.close()
+    await temp.stop()
 
 
 async def _reconnect(client: Client, index: int):
@@ -42,20 +66,16 @@ async def start():
         session_file = f"{session_path}.session"
 
         if not os.path.exists(session_file):
-            logger.info(f"Userbot {i}: no disk session found, creating from session_string...")
-            temp = Client(
-                name=session_path,
-                api_id=config.API_ID,
-                api_hash=config.API_HASH,
-                session_string=session,
-            )
-            await temp.start()
-            await temp.storage.save()
-            await temp.stop()
-            logger.info(f"Userbot {i}: session file created at {session_file}")
+            logger.info(f"Userbot {i}: creating disk session from session_string...")
+            try:
+                await _session_string_to_file(session, session_path, config.API_ID)
+                logger.info(f"Userbot {i}: session file created at {session_file}")
+            except Exception as ex:
+                logger.error(f"Userbot {i}: failed to create session file ({ex}), skipping.")
+                continue
 
         if not os.path.exists(session_file):
-            logger.error(f"Userbot {i}: session file still missing after creation, skipping.")
+            logger.error(f"Userbot {i}: session file missing, skipping.")
             continue
 
         client = Client(
